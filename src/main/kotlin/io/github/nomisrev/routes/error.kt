@@ -1,55 +1,48 @@
 package io.github.nomisrev.routes
 
 import arrow.core.Either
-import io.github.nomisrev.DomainError
+import io.github.nomisrev.ArticleBySlugNotFound
 import io.github.nomisrev.CannotGenerateSlug
+import io.github.nomisrev.CommentNotFound
+import io.github.nomisrev.DomainError
 import io.github.nomisrev.EmailAlreadyExists
 import io.github.nomisrev.EmptyUpdate
 import io.github.nomisrev.IncorrectInput
+import io.github.nomisrev.IncorrectJson
 import io.github.nomisrev.JwtGeneration
 import io.github.nomisrev.JwtInvalid
+import io.github.nomisrev.MissingParameter
+import io.github.nomisrev.NotArticleAuthor
+import io.github.nomisrev.NotCommentAuthor
 import io.github.nomisrev.PasswordNotMatched
-import io.github.nomisrev.Unexpected
 import io.github.nomisrev.UserNotFound
 import io.github.nomisrev.UsernameAlreadyExists
 import io.ktor.http.HttpStatusCode
-import io.ktor.server.application.ApplicationCall
-import io.ktor.server.application.call
 import io.ktor.server.response.respond
-import io.ktor.util.pipeline.PipelineContext
+import io.ktor.server.routing.RoutingContext
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
 
 @Serializable data class GenericErrorModel(val errors: GenericErrorModelErrors)
 
 @Serializable data class GenericErrorModelErrors(val body: List<String>)
 
-fun GenericErrorModel(vararg msg: String): GenericErrorModel =
-  GenericErrorModel(GenericErrorModelErrors(msg.toList()))
-
-context(PipelineContext<Unit, ApplicationCall>)
-
+context(RoutingContext)
 suspend inline fun <reified A : Any> Either<DomainError, A>.respond(status: HttpStatusCode): Unit =
   when (this) {
     is Either.Left -> respond(value)
     is Either.Right -> call.respond(status, value)
   }
 
+@OptIn(ExperimentalSerializationApi::class)
 @Suppress("ComplexMethod")
-suspend fun PipelineContext<Unit, ApplicationCall>.respond(error: DomainError): Unit =
+suspend fun RoutingContext.respond(error: DomainError): Unit =
   when (error) {
     PasswordNotMatched -> call.respond(HttpStatusCode.Unauthorized)
     is IncorrectInput ->
-      unprocessable(
-        error.errors.joinToString { field -> "${field.field}: ${field.errors.joinToString()}" }
-      )
-    is Unexpected ->
-      internal(
-        """
-        Unexpected failure occurred:
-          - description: ${error.description}
-          - cause: ${error.error}
-        """.trimIndent()
-      )
+      unprocessable(error.errors.map { field -> "${field.field}: ${field.errors.joinToString()}" })
+    is IncorrectJson ->
+      unprocessable("Json is missing fields: ${error.exception.missingFields.joinToString()}")
     is EmptyUpdate -> unprocessable(error.description)
     is EmailAlreadyExists -> unprocessable("${error.email} is already registered")
     is JwtGeneration -> unprocessable(error.description)
@@ -57,11 +50,21 @@ suspend fun PipelineContext<Unit, ApplicationCall>.respond(error: DomainError): 
     is UsernameAlreadyExists -> unprocessable("Username ${error.username} already exists")
     is JwtInvalid -> unprocessable(error.description)
     is CannotGenerateSlug -> unprocessable(error.description)
+    is ArticleBySlugNotFound -> unprocessable("Article by slug ${error.slug} not found")
+    is MissingParameter -> unprocessable("Missing ${error.name} parameter in request")
+    is NotArticleAuthor -> unprocessable("User is not the author of the article")
+    is CommentNotFound -> unprocessable("Comment with ID ${error.commentId} not found")
+    is NotCommentAuthor -> unprocessable("User is not the author of the comment")
   }
 
-private suspend inline fun PipelineContext<Unit, ApplicationCall>.unprocessable(
-  error: String
-): Unit = call.respond(HttpStatusCode.UnprocessableEntity, GenericErrorModel(error))
+private suspend inline fun RoutingContext.unprocessable(error: String): Unit =
+  call.respond(
+    HttpStatusCode.UnprocessableEntity,
+    GenericErrorModel(GenericErrorModelErrors(listOf(error))),
+  )
 
-private suspend inline fun PipelineContext<Unit, ApplicationCall>.internal(error: String): Unit =
-  call.respond(HttpStatusCode.InternalServerError, GenericErrorModel(error))
+private suspend inline fun RoutingContext.unprocessable(errors: List<String>): Unit =
+  call.respond(
+    HttpStatusCode.UnprocessableEntity,
+    GenericErrorModel(GenericErrorModelErrors(errors)),
+  )

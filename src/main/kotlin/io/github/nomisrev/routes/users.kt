@@ -1,9 +1,8 @@
 package io.github.nomisrev.routes
 
 import arrow.core.Either
-import arrow.core.continuations.either
-import io.github.nomisrev.DomainError
-import io.github.nomisrev.Unexpected
+import arrow.core.raise.either
+import io.github.nomisrev.IncorrectJson
 import io.github.nomisrev.auth.jwtAuth
 import io.github.nomisrev.service.JwtService
 import io.github.nomisrev.service.Login
@@ -11,16 +10,15 @@ import io.github.nomisrev.service.RegisterUser
 import io.github.nomisrev.service.Update
 import io.github.nomisrev.service.UserService
 import io.ktor.http.HttpStatusCode
-import io.ktor.server.application.Application
-import io.ktor.server.application.ApplicationCall
-import io.ktor.server.application.call
+import io.ktor.resources.Resource
 import io.ktor.server.request.receive
-import io.ktor.server.routing.get
-import io.ktor.server.routing.post
-import io.ktor.server.routing.put
-import io.ktor.server.routing.route
-import io.ktor.server.routing.routing
-import io.ktor.util.pipeline.PipelineContext
+import io.ktor.server.resources.get
+import io.ktor.server.resources.post
+import io.ktor.server.resources.put
+import io.ktor.server.routing.Route
+import io.ktor.server.routing.RoutingContext
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.MissingFieldException
 import kotlinx.serialization.Serializable
 
 @Serializable data class UserWrapper<T : Any>(val user: T)
@@ -33,7 +31,7 @@ data class UpdateUser(
   val username: String? = null,
   val password: String? = null,
   val bio: String? = null,
-  val image: String? = null
+  val image: String? = null,
 )
 
 @Serializable
@@ -42,39 +40,40 @@ data class User(
   val token: String,
   val username: String,
   val bio: String,
-  val image: String
+  val image: String,
 )
 
 @Serializable data class LoginUser(val email: String, val password: String)
 
-fun Application.userRoutes(
-  userService: UserService,
-  jwtService: JwtService,
-) = routing {
-  route("/users") {
-    /* Registration: POST /api/users */
-    post {
-      either<DomainError, UserWrapper<User>> {
-          val (username, email, password) = receiveCatching<UserWrapper<NewUser>>().bind().user
-          val token = userService.register(RegisterUser(username, email, password)).bind().value
-          UserWrapper(User(email, token, username, "", ""))
-        }
-        .respond(HttpStatusCode.Created)
-    }
-    post("/login") {
-      either<DomainError, UserWrapper<User>> {
-          val (email, password) = receiveCatching<UserWrapper<LoginUser>>().bind().user
-          val (token, info) = userService.login(Login(email, password)).bind()
-          UserWrapper(User(email, token.value, info.username, info.bio, info.image))
-        }
-        .respond(HttpStatusCode.OK)
-    }
-  }
+@Resource("/users")
+data class UsersResource(val parent: RootResource = RootResource) {
+  @Resource("/login") data class Login(val parent: UsersResource = UsersResource())
+}
 
+@Resource("/user") data class UserResource(val parent: RootResource = RootResource)
+
+fun Route.userRoutes(userService: UserService, jwtService: JwtService) {
+  /* Registration: POST /api/users */
+  post<UsersResource> {
+    either {
+        val (username, email, password) = receiveCatching<UserWrapper<NewUser>>().bind().user
+        val token = userService.register(RegisterUser(username, email, password)).bind().value
+        UserWrapper(User(email, token, username, "", ""))
+      }
+      .respond(HttpStatusCode.Created)
+  }
+  post<UsersResource.Login> {
+    either {
+        val (email, password) = receiveCatching<UserWrapper<LoginUser>>().bind().user
+        val (token, info) = userService.login(Login(email, password)).bind()
+        UserWrapper(User(email, token.value, info.username, info.bio, info.image))
+      }
+      .respond(HttpStatusCode.OK)
+  }
   /* Get Current User: GET /api/user */
-  get("/user") {
+  get<UserResource> {
     jwtAuth(jwtService) { (token, userId) ->
-      either<DomainError, UserWrapper<User>> {
+      either {
           val info = userService.getUser(userId).bind()
           UserWrapper(User(info.email, token.value, info.username, info.bio, info.image))
         }
@@ -83,9 +82,9 @@ fun Application.userRoutes(
   }
 
   /* Update current user: PUT /api/user */
-  put("/user") {
+  put<UserResource> {
     jwtAuth(jwtService) { (token, userId) ->
-      either<DomainError, UserWrapper<User>> {
+      either {
           val (email, username, password, bio, image) =
             receiveCatching<UserWrapper<UpdateUser>>().bind().user
           val info =
@@ -98,8 +97,7 @@ fun Application.userRoutes(
 }
 
 // TODO improve how we receive models with validation
-private suspend inline fun <reified A : Any> PipelineContext<
-  Unit, ApplicationCall>.receiveCatching(): Either<DomainError, A> =
-  Either.catch { call.receive<A>() }.mapLeft { e ->
-    Unexpected(e.message ?: "Received malformed JSON for ${A::class.simpleName}", e)
-  }
+@OptIn(ExperimentalSerializationApi::class)
+private suspend inline fun <reified A : Any> RoutingContext.receiveCatching():
+  Either<IncorrectJson, A> =
+  Either.catchOrThrow<MissingFieldException, A> { call.receive() }.mapLeft { IncorrectJson(it) }

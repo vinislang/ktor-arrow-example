@@ -1,7 +1,8 @@
 package io.github.nomisrev.service
 
 import arrow.core.Either
-import arrow.core.continuations.either
+import arrow.core.raise.either
+import arrow.core.raise.ensure
 import io.github.nomisrev.DomainError
 import io.github.nomisrev.EmptyUpdate
 import io.github.nomisrev.auth.JwtToken
@@ -17,7 +18,7 @@ data class Update(
   val email: String?,
   val password: String?,
   val bio: String?,
-  val image: String?
+  val image: String?,
 )
 
 data class Login(val email: String, val password: String)
@@ -49,12 +50,13 @@ fun userService(repo: UserPersistence, jwtService: JwtService) =
       jwtService.generateJwtToken(userId).bind()
     }
 
-    override suspend fun login(input: Login): Either<DomainError, Pair<JwtToken, UserInfo>> = either {
-      val (email, password) = input.validate().bind()
-      val (userId, info) = repo.verifyPassword(email, password).bind()
-      val token = jwtService.generateJwtToken(userId).bind()
-      Pair(token, info)
-    }
+    override suspend fun login(input: Login): Either<DomainError, Pair<JwtToken, UserInfo>> =
+      either {
+        val (email, password) = input.validate().bind()
+        val (userId, info) = repo.verifyPassword(email, password).bind()
+        val token = jwtService.generateJwtToken(userId).bind()
+        Pair(token, info)
+      }
 
     override suspend fun update(input: Update): Either<DomainError, UserInfo> = either {
       val (userId, username, email, password, bio, image) = input.validate().bind()
@@ -64,7 +66,8 @@ fun userService(repo: UserPersistence, jwtService: JwtService) =
       repo.update(userId, email, username, password, bio, image).bind()
     }
 
-    override suspend fun getUser(userId: UserId): Either<DomainError, UserInfo> = repo.select(userId)
+    override suspend fun getUser(userId: UserId): Either<DomainError, UserInfo> =
+      repo.select(userId)
 
     override suspend fun getUser(username: String): Either<DomainError, UserInfo> =
       repo.select(username)
